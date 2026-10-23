@@ -1,0 +1,82 @@
+name: 市場データ更新とページ公開
+
+on:
+  schedule:
+    - cron: "23 7 * * 1-5"    # 平日 16:23（日本時間）
+    - cron: "47 22 * * 0-4"   # 平日 07:47（日本時間）
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: market-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 準備
+        run: pip install -r requirements.txt || echo "yfinance なしで続行します"
+
+      - name: テスト
+        continue-on-error: true
+        run: if [ -f test_update_market.py ]; then python -m unittest test_update_market; fi
+
+      - name: 市場データを取得
+        id: fetch
+        continue-on-error: true
+        run: python update_market.py
+
+      - name: 取得できなかったときは前回のデータで作る
+        if: steps.fetch.outcome == 'failure'
+        run: python update_market.py --offline
+
+      - name: 変更を保存
+        continue-on-error: true
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add market.json bundle.js
+          if git diff --cached --quiet; then echo "変更なし"; exit 0; fi
+          git commit -m "data: 市場データ更新 $(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M')"
+          git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
+          git push
+
+      - name: 公開するファイルをまとめる
+        run: |
+          mkdir -p _site
+          cp index.html bundle.js research.json _site/
+          cp market.json _site/ 2>/dev/null || true
+          touch _site/.nojekyll
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+
+      - name: GitHub Pages に公開
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: 取得失敗のお知らせ
+        if: steps.fetch.outcome == 'failure'
+        run: |
+          echo "::error::市場データを取得できませんでした（前回のデータのまま公開しています）"
+          exit 1
